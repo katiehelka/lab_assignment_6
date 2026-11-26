@@ -1,0 +1,569 @@
+---
+title: "9041 Lab Assignment 6"
+subtitle: "Count Data Regression"
+author: "Katelyn Helka"
+date: today
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+    html-math-method: katex
+execute:
+  echo: true
+  warning: false
+  message: false
+  fig-width: 8
+  fig-height: 4.4
+---
+# Lab Set-Up
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(psych)      
+library(ordinal)   
+library(readxl)     
+library(ggeffects)
+library(broom)    
+library(gt)    
+
+```
+
+### Load and inspect the data
+
+```{r}
+#| label: Loading Data
+#| echo: false
+
+data <- read_excel("./bfi.xlsx")
+
+data<- data|>
+  mutate_at(2:26, as.integer)
+
+head(data)
+```
+### Question and Predictions
+
+The `bfi` data contain 25 personality items from 2,800 people, five items per Big Five trait. Each item is answered on a 6-point scale from *Very inaccurate* to *Very accurate*.
+
+The **chosen trait is Extraversion**. The ordered outcome is one Extraversion item, **E4, "Make friends easily."** The predictor is a person's **Openness subscale score**, the mean of O1 to O5 with O2 and O5 reverse-keyed. The non-centred mean of the Openness subscale is `r mean(rowMeans(data.frame(data$O1, 7-data$O2, data$O3, data$O4, 7-data$O5), na.rm = FALSE))`
+
+If a person is more open, they will most likely be able to talk with a variety of people about a wide array of topics which will translate into making friends easily. Therefore, I predict that when people are more open, they will be more likely to make friends easily. 
+
+### Data preparation
+
+```{r}
+#| label: Data Prep
+
+# Labels for the six response options, from lowest to highest
+n_levels <- c("Very inaccurate", "Moderately inaccurate", "Slightly inaccurate",
+              "Slightly accurate", "Moderately accurate", "Very accurate")
+
+# Scoring keys with reverse-keyed items
+keys <- list(
+  Agreeableness     = c("-A1", "A2", "A3", "A4", "A5"),
+  Conscientiousness = c("C1", "C2", "C3", "-C4", "-C5"),
+  Extraversion      = c("-E1", "-E2", "E3", "E4", "E5"),
+  Neuroticism       = c("N1", "N2", "N3", "N4", "N5"),
+  Openness          = c("O1", "-O2", "O3", "O4", "-O5")
+)
+
+scores<-scoreItems(keys, data, totals = F, min=1, max=6)
+
+scores_df<- scores$scores
+
+# Mutate data to include the ordered outcome, an unordered outcome, and the predictor (raw and centred)
+data <- data |>
+  select(E4) |>
+  bind_cols(as_tibble(scores_df)) |>
+  mutate(
+    E4 = factor(E4, levels = 1:6, labels = n_levels, ordered = TRUE),   # The ordered outcome
+    highest = factor(names(keys)[max.col(scores_df, ties.method = "first")]),  # Unordered outcome:highest-scoring trait
+    open = Openness
+  ) |>
+  drop_na(E4, open, highest) |>
+  mutate(open_c = open - mean(open))  # Centre AFTER dropping missing cases
+
+open_bar <- mean(data$open)
+
+```
+
+# Examining the Outcomes
+
+### The ordered outcome
+
+```{r}
+#| label: E4 counts
+
+# Count how many people chose each response option for E4.
+e4_counts <- data |>
+  count(E4) |>
+  # p is the proportion of the sample in each category, P(Y = j).
+  mutate(p = n / sum(n))
+```
+
+
+```{r}
+#| label: format table
+
+e4_counts |>
+   mutate(p = round(p, digits = 3)) |>
+  gt()
+
+```
+
+Every category has plenty of responses (the smallest, *Very inaccurate*, has `r min(e4_counts$n)`), so each threshold can be estimated without collapsing categories.
+
+```{r}
+#| label: Bar chart of E4 counts
+
+#plot the counts
+plot_e4 <- ggplot(e4_counts, aes(x = E4, y = n, fill = E4)) +
+  geom_col(width = 0.7) +
+  scale_x_discrete(labels = scales::label_wrap(12)) +
+  labs(title = "Six ordered categories: 'Make friends easily'",
+       x = NULL, y = "People") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+plot_e4
+
+```
+
+### Showing How the Predictor Relates to the Outcome
+
+```{r}
+#| label: Jitter Plot
+
+plot_jitter<-ggplot(data, aes(open, as.numeric(E4), colour = E4)) +
+  geom_jitter(width = 0.05, height = 0.15, alpha = 0.25, size = 1.4) +
+  scale_y_continuous(breaks = 1:6, labels = n_levels) +
+  labs(title = "Higher Openness,\nHigher Ability to make Friends,\nwith lots of Overlap",
+       x = "Openness (subscale mean, 1-6)", y = "I make friends easily") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+plot_jitter
+
+```
+The jitter plot shows a positive association between Openness and the tendency to endorse the item `I make friends easily` as higher Openness scores appear to have larger clusters along the item. However there is a lot of overlap along Openness scores and each level of agreement with the item. This makes sense as the outcome is ordinal, so although the response categories have a meaningful order, the distances between response options cannot be assumed equal. Therefore, an appropriate model should estimate the probability of an individual responding in each category rather than predicting a single numerical value especially since a predicted numeric value does not correspond to an actual response category.
+
+### The Unordered Outcome
+
+```{r}
+#| label: Unordered outcome and plot
+
+ordered_dat <- data |>
+  count(highest) |>
+  mutate(highest = fct_reorder(highest, n))
+
+#plot the unordered outcome
+unordered_plot <- ggplot(ordered_dat, aes(highest, n)) +
+  geom_col(width = 0.65, fill = "lightseagreen") +
+  coord_flip() +
+  labs(title = "Dominant trait: five categories with no order",
+       x = NULL, y = "People") +
+  theme_minimal()
+
+unordered_plot
+
+```
+
+Since each person's **dominant trait** (their highest of the five subscale scores) is a set of categories with **no built-in order** and therefore `highest` is an unordered variable. For example, scoring highest on Openness is not "more" than scoring highest on Agreeableness, or vice versa.
+
+# Cumulative Probabilities
+
+### Cumulative Proportion Table
+
+```{r}
+#| label: Cumulative Probability Table
+
+#creating the table
+obs_tab <- data |>
+  count(E4) |>
+  mutate(
+    Probability = n / sum(n),
+    CumulativeProbability = cumsum(Probability),
+    CumulativeOdds = if_else(CumulativeProbability < 1,
+                             CumulativeProbability / (1 - CumulativeProbability), NA_real_),
+    Cumulative_Logodds = if_else(CumulativeProbability < 1,
+                                 qlogis(CumulativeProbability), NA_real_)  
+  )
+
+# creating a clean table with gt
+obs_tab |>
+  gt() |>
+  cols_label(
+    E4 = "Category in E4 (j)",
+    n = "n",
+    Probability = "P(Y = j)",
+    CumulativeProbability = "P(Y ≤ j)",
+    CumulativeOdds = "Odds of ≤ j",
+    Cumulative_Logodds = "Log-odds of ≤ j"
+  ) |>
+  fmt_number(columns = c(Probability, CumulativeProbability), decimals = 3) |>
+  fmt_number(columns = c(CumulativeOdds, Cumulative_Logodds), decimals = 3) |>
+  sub_missing(missing_text = "—")
+
+```
+
+Please note that since a cumulative probability is the probability of responding **with a specific response category (*j*)** or lower, each category's probability will increase as the probability of that response is added to the probabilities of each lower response (i.e., selecting slightly inaccurate OR moderately inaccurate OR very inaccurate). Therefore, with six categories there are five cumulative probabilities to model as the cumulative probability of the sixth category (very accurate) is 100%. This is also why the odds for any last category in cumulative probabilities has undefined odds; all categories are included in the final category so there is not a binary outcome for an odds formula to calculate the probability of not choosing any option. 
+
+# Specifying and Estimating Cumulative logit Models
+
+As I stated above, the outcome `E4 - makes friends easily` is ordinal - the response categories have a meaningful order (*Very inaccurate < Moderately inaccurate < Slightly inaccurate < Slightly accurate < Moderately accurate < Very accurate*) but the distances between response options cannot be assumed equal as people may interpret the response categories differently. Therefore, an appropriate model should estimate the probability of an individual responding in each ordered category which is why an ordinal model suits this response outcome.
+
+### Estimating the Two Nested Models
+
+```{r}
+#| label: Nested Models
+
+# Null model: thresholds only, no predictors
+null <- clm(E4 ~ 1, data = data)
+
+# One-predictor model
+one_pred <- clm(E4 ~ open_c, data = data)
+
+summary(one_pred)
+```
+
+```{r, saving elements for inline code}
+#| include: FALSE
+
+
+# coef() lists every estimate in the model: the 5 thresholds first, then the slope.
+coef(one_pred)
+
+# The slope for Openness, pulled out by name
+b <- coef(one_pred)[["open_c"]]
+
+# The five thresholds are the first five estimates
+th <- coef(one_pred)[1:5]
+
+# Category probabilities for a person of average Openness open_c = 0).
+# plogis() turns log-odds into a probability, so plogis(th) gives P(Y <= j).
+cum_avg <- plogis(th)
+
+# Category probabilities for a person of average Openness (open_c = 0).
+# cumulative probabilities. Writing them out one at a time:
+cat_p <- c(cum_avg[1] - 0,          # Very inaccurate
+           cum_avg[2] - cum_avg[1], # Moderately inaccurate
+           cum_avg[3] - cum_avg[2], # Slightly inaccurate
+           cum_avg[4] - cum_avg[3], # Slightly accurate
+           cum_avg[5] - cum_avg[4], # Moderately accurate
+           1 - cum_avg[5])          # Very accurate
+
+# tidy() (broom package) turns the model output into a data frame.
+#   conf.int = TRUE      -> add 95% confidence intervals
+#   exponentiate = TRUE  -> report odds ratios (e^beta) instead of log-odds
+# filter(coef.type == "location") keeps the slope and drops the thresholds.
+or_tab <- tidy(one_pred, conf.int = TRUE, exponentiate = TRUE) |>
+  filter(coef.type == "location")
+
+cum <- c(plogis(th), 1)
+cat_p <- diff(c(0, cum, 1))
+
+```
+
+I **centred** Openness earlier, so that the thresholds describe a person of average Openness (`r round(open_bar, digits = 3)`), rather than an impossible person scoring 0 on a 1-6 scale. Centring changes the thresholds but **not** the slope since the change in values will remain the same.
+
+When reading the `summary()` output above, the **thresholds** are the points at which a response moved from one category to the next. **Coefficients** are the **slopes** which represent the effect of Agreeableness on the latent logit scale.
+
+The estimated slope is beta = `r round(b, 3)`, so Higher Openness **lowers** the log-odds of being at or below each threshold, which shifts responses toward the **higher** ("accurate") categories.
+
+### What the centred thresholds mean
+
+```{r}
+#| label: plogis table
+
+# plogis() turns a log-odds into a probability. 
+
+tibble(
+  Category = n_levels,
+  theta = c(th, NA),
+  cum = c(plogis(th), 1),
+  cat_p = diff(c(0, plogis(th), 1))
+) |>
+  gt() |>
+  cols_label(
+    theta = "Threshold above category",
+    cum = "P(Y ≤ j)",
+    cat_p = "P(Y = j)"
+  ) |>
+  fmt_number(columns = theta, decimals = 2) |>
+  fmt_number(columns = c(cum, cat_p), decimals = 2) |>
+  sub_missing(missing_text = "—")
+
+```
+
+Applying `plogis()` to each threshold gives a cumulative probability and then it takes differences. For a person of average Openness, the most likely response is *`r n_levels[which.max(cat_p)]`* (`r round(max(cat_p), digits = 3)`). Their probability of endorsing the item at all, that is, *`r n_levels[which.max(cat_p)]`* or lower, is the probability of *`r n_levels[which.max(cat_p)]`* at `r round(100 * cum[which.max(cat_p)], 1)` %. 
+
+### Checking the Null Model
+
+```{r}
+#|label: check null
+
+# View thresholds produced, and how they are the same as the cumulative log-odds
+coef(null)
+obs_tab$Cumulative_Logodds[1:5]
+
+```
+
+As can be seen with the above output, the null model has the same thresholds as the observed cumulative log-odds. This is because in a null model without any predictors, the thresholds are estimated using the cumulative log-odds from the data. The one-pred model uses Openness as a predictor, so the thresholds are now estimated using the differences in Openness. Therefore, since the predictor is included in the model, the probability of selecting different response categories is reliant on the predictor. 
+
+# Comparing the Models
+
+```{r}
+#|label: comparing the models
+
+# anova() on two clm models gives an LRT
+lrt <- anova(null, one_pred)
+lrt
+```
+
+Adding Openness improves fit by a statistically significant amount, χ²(`r lrt[2, "df"]`) = `r round(lrt[2, "LR.stat"], 2)`, `r ifelse(lrt[2, "Pr(>Chisq)"] < .001, "*p* < .001", paste0("*p* = ", round(lrt[2, "Pr(>Chisq)"], 3)))`. The change in the degree of freedom is because the Openness model estimates one additional  parameter, the Openness predictor and the χ² value and p-value shows us that including Openness signficiantly improved the fit of the model.
+```{r}
+#| label: logLik and AIC
+
+# logLik() and AIC() pull the fit statistics from each model.
+# length(coef(...)) counts the estimated parameters.
+tibble(
+  Model = c("Null", "Openness"),
+  Parameters = c(length(coef(null)), length(coef(one_pred))),
+  logLik = c(logLik(null), logLik(one_pred)),
+  AIC = c(AIC(null), AIC(one_pred))
+) |>
+  mutate(`ΔAIC` = AIC - min(AIC)) |>
+  gt() |>
+  fmt_number(columns = c(logLik, AIC, `ΔAIC`), decimals = 1)
+
+```
+
+
+AIC agrees with the likelihood ratio test: the Openness model is preferred by a small margin (ΔAIC = `r sprintf("%.1f", AIC(null) - AIC(one_pred))`).Therefore, I am choosing the Openness model (`one_pred`) as it improved model fit significantly (χ²(`r lrt[2, "df"]`) = `r round(lrt[2, "LR.stat"], 2)`, `r ifelse(lrt[2, "Pr(>Chisq)"] < .001, "*p* < .001", paste0("*p* = ", round(lrt[2, "Pr(>Chisq)"], 3)))`). 
+
+### Interpretting the Slope on the Latent Scale
+
+```{r}
+#| label: lrt aic values for inline coding
+
+lr_stat <- lrt$LR.stat[2]
+lr_df <- lrt$df[2]
+lr_p <- lrt$`Pr(>Chisq)`[2]
+d_aic <- AIC(null) - AIC(one_pred)
+
+```
+
+The slope, beta = `r b`, is on the latent logit scale. A one-point increase in Openness moves a person's latent "extraversion proneness" as reflected by E4 up by `r abs(b)`. The middle categories are each about `r mean(diff(th)[2:3])` units wide on that scale, so one point of Openness shifts someone by roughly `r 100 * abs(b) / mean(diff(th)[2:3])`% of a category.
+
+# Check the Proportional Odds Assumption
+
+### Testing Proportional Odds
+
+```{r}
+#| label: nominal test
+
+nt <- nominal_test(one_pred)
+nt
+
+```
+
+```{r}
+#| label:  nominal values for inline
+#| echo: False
+
+# nt is a table: pick out [row, column] by name
+
+nt_lrt <- nt["open_c", "LRT"]
+nt_df <- nt["open_c", "Df"]
+nt_p <- nt["open_c", "Pr(>Chi)"]
+
+```
+
+The nominal test **was** significant (χ²(`r nt_df`) = `r round(nt_lrt, 2)`, `r ifelse(nt_p < .001, "*p* < .001", paste0("*p* = ", round(nt_p, 3)))`).  and so I will also  use a partial proportional-odds model as seen below.
+
+### Fitting a Partial Proportional Odds Model
+
+```{r}
+#| label: partial prop odds
+
+#partial odds model
+m_nom <- clm(E4 ~ 1, nominal = ~ open_c, data = data)
+
+#compare the two models to see which has superior fit
+
+anova(one_pred, m_nom)
+
+```
+
+```{r}
+#| label: nominal coefficients for inline
+
+# Look at the estimates: the first 5 are the thresholds, and estimates 6 to 10 are the five Openness slopes (one per threshold).
+
+coef(m_nom)
+
+nom_est <- coef(m_nom)[6:10]
+
+# Their standard errors. vcov() gives the variance-covariance matrix of the estimates; diag() takes its diagonal (the variances), and sqrt() turns variances into standard errors.
+
+nom_se <- sqrt(diag(vcov(m_nom)))[6:10]
+
+threshold_or <- tibble(
+  Threshold = c("Very inaccurate | Moderately inaccurate",
+                "Moderately inaccurate | Slightly inaccurate",
+                "Slightly inaccurate | Slightly accurate",
+                "Slightly accurate | Moderately accurate",
+                "Moderately accurate | Very accurate"),
+  Estimate = nom_est,
+  SE = nom_se,
+  OR = exp(-Estimate),              
+  low = exp(-(Estimate + 1.96 * SE)),
+  high = exp(-(Estimate - 1.96 * SE))
+)
+
+threshold_or |>
+  gt() |>
+  fmt_number(
+    columns = where(is.numeric),
+    decimals = 2
+  )
+
+```
+
+These results further demonstrate that the `one_pred` model violated the proportional odds assumption. The likelihood ratio test indicated that allowing th effect of Openness to vary across response threshold  (the nominal model `m_nom`) significantly improved model fit (χ²(`r nt_df`) = `r round(nt_lrt)`, `r ifelse(nt_p < .001, "*p* < .001", paste0("*p* = ", round(lrt_p, 3)))`).
+
+# Interpreting the Results
+
+### Interpreting the Odds Ratio
+
+```{r}
+#| label: interpret odds ratio
+
+or_tab <- tidy(one_pred, conf.int = TRUE, conf.type = "Wald", exponentiate = TRUE) |>
+   filter(coef.type == "location")
+
+or_tab |>
+  gt() |>
+  fmt_number(
+    columns = where(is.numeric),
+    decimals = 3
+  )
+
+```
+
+**Openness:** e\^beta = `r or_tab$estimate`, 95% CI [`r or_tab$conf.low`, `r or_tab$conf.high`], p `r or_tab$p.value`. Each one-point increase in Openness multiplies the odds of responding **above any threshold** (for example, "Slightly accurate or higher" versus lower) by `r or_tab$estimate`. That is a **`r round(100 * (1 - or_tab$estimate))`% decrease** in those odds.
+
+An odds ratio is not a change in the number of categories, and it is not a ratio of probabilities. The table below translates it into probabilities. It uses the threshold between *Slightly inaccurate* and *Slightly accurate*, so it shows the probability of endorsing the item at all:
+
+```{r}
+#| label: converting the OR to probabilities
+
+# We use the threshold between "Slightly inaccurate" and "Slightly accurate", because the model used centred Openness, I'll subtract open_bar from each raw score first.
+
+# The model gives log-odds of being AT OR BELOW the threshold:
+#     log-odds = threshold - slope * open_c
+
+# Openness = 3
+logodds_3 <- nom_est[3] - b * (3 - open_bar)   # log-odds of at or below
+prob_3    <- 1 - plogis(logodds_3)         # plogis() -> probability; 1 - it = P(above)
+odds_3    <- prob_3 / (1 - prob_3)         # odds of being above
+
+# Openness = 4
+logodds_4 <- nom_est[3] - b * (4 - open_bar)
+prob_4    <- 1 - plogis(logodds_4)
+odds_4    <- prob_4 / (1 - prob_4)
+
+# Openness = 5
+logodds_5 <- nom_est[3] - b * (5 - open_bar)
+prob_5    <- 1 - plogis(logodds_5)
+odds_5    <- prob_5 / (1 - prob_5)
+
+# Openness = 6
+logodds_6 <- nom_est[3] - b * (6 - open_bar)
+prob_6    <- 1 - plogis(logodds_6)
+odds_6    <- prob_6 / (1 - prob_6)
+
+prob_tab <- tibble(
+  Openness = c(3, 4, 5, 6),
+  Prob = c(prob_3, prob_4, prob_5, prob_6),
+  Odds = c(odds_3, odds_4, odds_5, odds_6)
+)
+
+prob_tab |>
+  gt() |>
+  cols_label(Prob = "P(Slightly accurate or higher)") |>
+  fmt_number(columns = c(Prob, Odds), decimals = 2)
+
+```
+
+Each one-point step multiplies the odds by `r prob_tab$Odds[2] / prob_tab$Odds[1]`, which is the OR. The **probability**, however, falls by `r prob_tab$Prob[1] - prob_tab$Prob[2]` from 3 to 4 and `r prob_tab$Prob[3] - prob_tab$Prob[4]` from 5 to 6. A constant odds ratio implies different probability changes depending on where you start, which is why we also plot predicted probabilities.
+
+### Plotting Predicted Category Probabilities
+
+```{r} 
+#| label: pred cat
+
+# ggpredict() returns one row per Openness value x response category.
+pred <- ggpredict(m_nom, terms = "open_c [all]")
+
+```
+
+```{r}
+#| label: stacked plot
+
+pred |>
+  as.data.frame() |>
+  mutate(
+    response.level = factor(response.level,
+                            labels = n_levels),
+    open = x + open_bar   
+  ) |>
+  ggplot(aes(open, predicted, fill = response.level)) +
+  geom_area(position = "stack") +
+  scale_y_continuous(labels = scales::percent) +
+  guides(fill = guide_legend(nrow = 2)) +
+  labs(title = "Predicted probability of each response to E4:\n'Make friends easily'",
+       x = "Openness (subscale mean)", 
+       y = "Predicted probability", fill = NULL) 
+
+```
+
+At all levels of Openness the probability mostly sits in the "accurate" categories but at *low* Openness, more of the probability sits in the "inaccurate" categories than at *high* Openness. As Openness rises, it moves more toward *Moderately accurate* and *Very accurate*. At every value of Openness, the six probabilities sum to 1, which is why the stack always reaches 100%.
+
+### Coefficient Plot of Cumulative Odds Ratios
+
+```{r}
+#| label: OR plot
+
+bind_rows(
+  tibble(Threshold = "Shared (proportional odds)", OR = or_tab$estimate,
+         low = or_tab$conf.low, high = or_tab$conf.high, type = "Shared"),
+  threshold_or |> transmute(Threshold, OR, low, high, type = "Threshold-specific")
+) |>
+  mutate(Threshold = fct_rev(fct_inorder(Threshold))) |>   # keep thresholds in order, top to bottom
+  ggplot(aes(OR, Threshold, colour = type)) +
+  geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +  # OR = 1 means no effect
+  geom_pointrange(aes(xmin = low, xmax = high)) +
+  labs(title = "Cumulative odds ratios per point of Openness",
+       x = "Odds ratio (responding above the threshold)", y = NULL, colour = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+None of the intervals sit well below 1 (the dashed line), and two intervals sit well above 1.  The threshold-specific estimates also vary in size across the response categories, rather than consistently matching the shared odds ratio from the proportional-odds model. This suggests that the effect of Openness differs depending on the threshold which provides further evidence that the proportional-odds assumption was violated and the partial proportional-odds model was more appropriate. 
+
+# 8. Results paragraph
+
+I fit a cumulative logit (proportional-odds) model predicting responses to "Make friends easily" from mean-centred Openness (N= `r format(nrow(data), big.mark = ",")`). Openness improved fit over a null model, χ²^2(`r lr_df`) = `r round(lr_stat,2)`, p `r `round(lr_p, 3)`. As predicted, more open people were more likely to endorse the item, OR = `r round(or_tab$estimate,2)`, 95% CI [`r round(or_tab$conf.low, 2)`, `r round(or_tab$conf.high)`]: each one-point increase in Openness increased the odds of a higher response by about `r round(100 * (or_tab$estimate - 1), 1)`%. However. the proportional-odds assumption did not hold, χ²(`r nt_df`) = `r round(nt_lrt,2)`, p `r round(nt_p,3)`. Therefore, a partial proportional-odds model was estimated, allowing the effect of Openness to vary across the five response thresholds.
+
+The threshold-specific odds ratios showed that the association between Openness and response endorsement varied across the response scale (Figure: Cumulative odds ratios per point of Openness). At the two lowest thresholds, the odds ratios were `r round(threshold_or$OR[1], 2)` (95% CI [`r round(threshold_or$low[1], 2)`, `r round(threshold_or$high[1], 2)`]) and `r round(threshold_or$OR[2], 2)` (95% CI [`r round(threshold_or$low[2], 2)`, `r round(threshold_or$high[2], 2)`]), respectively, with both confidence intervals including 1. The association became stronger at the higher thresholds, with odds ratios of `r round(threshold_or$OR[4], 2)` (95% CI [`r round(threshold_or$low[4], 2)`, `r round(threshold_or$high[4], 2)`]) and `r round(threshold_or$OR[5], 2)` (95% CI [`r round(threshold_or$low[5], 2)`, `r round(threshold_or$high[5], 2)`]). Both of these confidence intervals were above 1. This suggests that Openness was more strongly associated with endorsing the higher response categories, supporting the use of the partial proportional-odds model.
+
+The predicted probability of endorsing the item (Slightly accurate or higher) rose from `r prob_tab$Prob[1]` at an Openness score of 3 to `r prob_tab$Prob[4]` at a score of 6 (Figure: Predicted probability of each response to E4: 'Make friends easily).
+
+Overall, my prediction was supported. 
